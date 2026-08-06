@@ -1,4 +1,3 @@
-Readme · MD
 # WakeupKria
  
 음성으로 디바이스를 활성화하고 제스처로 명령을 내린다
