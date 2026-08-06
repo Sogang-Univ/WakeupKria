@@ -137,11 +137,14 @@ echo "============================================================"
 cat <<EOF
 
 확인
-  systemctl status uvc-bwcap.service
+  systemctl status uvc-bwcap.service -> 1-1.1:1.0 -> uvcvideo_bwcap (패치됨)
   journalctl -u uvc-bwcap.service -b
   ls -l /dev/cam*
-  dmesg | grep -i Capping | tail
-
+  스트림을 한 번 열어서 로그 유발
+  v4l2-ctl -d /dev/cam0 --set-fmt-video=width=1280,height=720,pixelformat=MJPG \
+  --set-parm=30 --stream-mmap --stream-count=30 --stream-to=/dev/null
+  dmesg | grep -iE "Capping|alternate setting" | tail
+  
 중요 — 커널 업그레이드 시 모듈이 깨집니다
   .ko 는 ${KVER} 전용입니다. apt 가 커널을 올리면 로드에 실패하고
   builtin 으로 되돌아가 두 번째 카메라가 다시 -ENOSPC 를 냅니다.
