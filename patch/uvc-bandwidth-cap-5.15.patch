@@ -1,0 +1,83 @@
+media: uvcvideo: add bandwidth_cap module parameter
+
+Many UVC devices request the largest available alternate setting for
+compressed formats regardless of the actual bitrate they produce. The
+Logitech C270 (046d:0825) always asks for 3060 B/frame (~24.5 MB/s) even
+though a 1280x720@30 MJPEG stream measures well under 3 MB/s.
+
+On a shared USB 2.0 bus this exhausts the periodic transfer budget and
+any second isochronous device fails to start with -ENOSPC.
+UVC_QUIRK_FIX_BANDWIDTH cannot help because the kernel has no way to
+estimate the size of a compressed frame, so add a module parameter that
+lets the administrator cap dwMaxPayloadTransferSize manually.
+
+The parameter is writable at runtime (0644) and is applied during
+streaming control negotiation, so a new value takes effect on the next
+VIDIOC_STREAMON without reloading the driver.
+
+  modprobe uvcvideo bandwidth_cap=1024
+  echo 1536 > /sys/module/uvcvideo/parameters/bandwidth_cap
+
+A value of 0 (the default) disables the cap and preserves the existing
+upstream behaviour.
+
+Tested against Linux 5.15 on AMD Kria KV260 (Zynq UltraScale+ MPSoC),
+two Logitech C270 cameras behind the on-board USB2734 hub.
+
+--- a/drivers/media/usb/uvc/uvcvideo.h
++++ b/drivers/media/usb/uvc/uvcvideo.h
+@@ -754,6 +754,7 @@
+ extern unsigned int uvc_dbg_param;
+ extern unsigned int uvc_timeout_param;
+ extern unsigned int uvc_hw_timestamps_param;
++extern unsigned int uvc_bandwidth_cap_param;
+ 
+ #define uvc_dbg(_dev, flag, fmt, ...)					\
+ do {									\
+--- a/drivers/media/usb/uvc/uvc_driver.c
++++ b/drivers/media/usb/uvc/uvc_driver.c
+@@ -34,6 +34,7 @@
+ static unsigned int uvc_quirks_param = -1;
+ unsigned int uvc_dbg_param;
+ unsigned int uvc_timeout_param = UVC_CTRL_STREAMING_TIMEOUT;
++unsigned int uvc_bandwidth_cap_param;
+ 
+ /* ------------------------------------------------------------------------
+  * Video formats
+@@ -2634,6 +2635,9 @@
+ MODULE_PARM_DESC(trace, "Trace level bitmask");
+ module_param_named(timeout, uvc_timeout_param, uint, S_IRUGO|S_IWUSR);
+ MODULE_PARM_DESC(timeout, "Streaming control requests timeout");
++module_param_named(bandwidth_cap, uvc_bandwidth_cap_param, uint, S_IRUGO|S_IWUSR);
++MODULE_PARM_DESC(bandwidth_cap,
++	"Cap dwMaxPayloadTransferSize in bytes per (micro)frame, 0 = disabled");
+ 
+ /* ------------------------------------------------------------------------
+  * Driver initialization and cleanup
+--- a/drivers/media/usb/uvc/uvc_video.c
++++ b/drivers/media/usb/uvc/uvc_video.c
+@@ -226,6 +226,24 @@
+ 
+ 		ctrl->dwMaxPayloadTransferSize = bandwidth;
+ 	}
++
++	/*
++	 * Many devices request the largest available alternate setting for
++	 * compressed formats regardless of the actual bitrate they produce
++	 * (the Logitech C270 always asks for 3060 B/frame, ~24.5 MB/s). On a
++	 * shared USB 2.0 bus this starves every other isochronous device and
++	 * makes multi-camera setups fail with -ENOSPC. UVC_QUIRK_FIX_BANDWIDTH
++	 * cannot help here because the kernel has no way to estimate the size
++	 * of a compressed frame, so allow the cap to be set manually.
++	 */
++	if (uvc_bandwidth_cap_param && stream->intf->num_altsetting > 1 &&
++	    ctrl->dwMaxPayloadTransferSize > uvc_bandwidth_cap_param) {
++		uvc_dbg(stream->dev, VIDEO,
++			"Capping bandwidth %u -> %u B/frame\n",
++			ctrl->dwMaxPayloadTransferSize,
++			uvc_bandwidth_cap_param);
++		ctrl->dwMaxPayloadTransferSize = uvc_bandwidth_cap_param;
++	}
+ }
+ 
+ static size_t uvc_video_ctrl_size(struct uvc_streaming *stream)
