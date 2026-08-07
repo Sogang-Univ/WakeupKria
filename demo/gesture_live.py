@@ -54,7 +54,8 @@ FEAT_DIM = 11
 SEQ_WINDOW_S = 1.0      # 학습 데이터의 30프레임이 덮던 실제 시간. 촬영 fps 로 확정할 것
 GRU_EVERY = 5           # 매 프레임 돌릴 필요 없다. 5프레임마다 1회
 GESTURE_THRES = 0.70
-REFRACTORY_S = 1.5
+COOLDOWN_S = 1.0        # 제스처 1회 발화 후 이 시간 동안 예측 정지 + 시퀀스 버퍼 폐기.
+                        # 복귀동작이 다음 창에 섞여 재발화하는 것을 막는다.
 
 # ---- 정지(idle) 게이트 ----
 # 학습 데이터에는 '아무 제스처도 아님' 클래스가 없다. 960개 trial 이 전부 의도적으로
@@ -521,8 +522,8 @@ def parse_args():
                    help="정지 게이트를 끈다. 게이트 유무 비교용")
     p.add_argument("--gate-debug", action="store_true",
                    help="차단된 창의 disp/shape 를 출력한다")
-    p.add_argument("--refractory", type=float, default=REFRACTORY_S,
-                   help="검출 후 재검출 억제 시간(초)")
+    p.add_argument("--cooldown", type=float, default=COOLDOWN_S,
+                   help="제스처 검출 후 예측을 멈추는 시간(초). 복귀동작 무시용")
     p.add_argument("--no-display", action="store_true",
                    help="헤드리스 실행 (SSH 등). DISPLAY 가 없으면 자동으로 켜진다")
     p.add_argument("--dump-seq", action="store_true",
@@ -549,6 +550,7 @@ def main():
     print(f"[INFO] Stage2     : {args.gru}")
     print(f"[INFO] conf={args.conf}  iou={IOU_THRES}  max_det={MAX_DETS}")
     print(f"[INFO] window={args.window}s  seq_len={SEQ_LEN}  gru_every={args.gru_every}")
+    print(f"[INFO] cooldown={args.cooldown}s (발화 후 이 시간 동안 버퍼를 비우고 예측 정지)")
     if args.no_gate:
         print("[INFO] 정지 게이트 OFF — 손을 멈춰도 GRU 가 돌고 오검출이 난다")
     else:
@@ -577,7 +579,7 @@ def main():
     prev = time.time()
     t_start = time.time()
     frame_no = 0
-    last_fire = -1e9
+    cooldown_until = 0.0
     latched = ("", 0.0)
     n_gated = 0          # 게이트가 막은 창 수
     n_gru = 0            # 실제로 GRU 를 돌린 창 수
@@ -606,7 +608,12 @@ def main():
                        float(scores[0]), int(cls_ids[0]))
             else:
                 det = None
-            seqbuf.push(now, det)
+            if now < cooldown_until:
+                seqbuf.buf.clear()      # 쿨다운 중엔 아무것도 쌓지 않는다. 끝난 뒤
+                                        # window_s 만큼 새로 채워야 ready() 가 되므로
+                                        # 복귀동작은 다음 창에 들어올 수 없다
+            else:
+                seqbuf.push(now, det)
 
             frame_no += 1
             if frame_no % args.gru_every == 0 and seqbuf.ready(now):
@@ -627,10 +634,9 @@ def main():
                     gru_ms = (time.perf_counter() - t_g) * 1000
 
                     k = int(np.argmax(prob))
-                    fired = (prob[k] >= args.gesture_thres
-                             and (now - last_fire) > args.refractory)
+                    fired = prob[k] >= args.gesture_thres
                     if fired:
-                        last_fire = now
+                        cooldown_until = now + args.cooldown
                         latched = (GESTURE_CLASSES[k], float(prob[k]))
                         print(f"[GESTURE] {latched[0]:12s} p={latched[1]:.3f}  "
                               f"t={now - t_start:6.1f}s")
@@ -643,7 +649,7 @@ def main():
 
             if show:
                 draw(frame, boxes, scores, cls_ids)
-                if latched[0] and (now - last_fire) < args.refractory:
+                if latched[0] and now < cooldown_until:
                     cv2.putText(frame, f"{latched[0]} {latched[1]:.2f}", (8, 60),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
