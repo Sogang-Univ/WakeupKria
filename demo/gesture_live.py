@@ -46,7 +46,10 @@ IOU_THRES = 0.45
 NUM_CLASSES = len(SHAPE_CLASSES)
 REG_MAX = 16
 MAX_DETS = 1
-COLORS = [(30, 200, 30), (200, 30, 30), (30, 30, 200), (200, 160, 30)]
+# 9색이다. 손모양은 4클래스지만 draw() 를 02 의 작업 모델(쓰레기 9클래스)이 같이 쓴다.
+COLORS = [(30, 200, 30), (200, 30, 30), (30, 30, 200), (200, 160, 30),
+          (200, 30, 200), (30, 200, 200), (120, 120, 255), (255, 120, 30),
+          (140, 200, 60)]
 
 # ---- Stage 2 ----
 SEQ_LEN = 30
@@ -179,8 +182,18 @@ def to_nchw_head(out: np.ndarray, num_classes: int) -> np.ndarray:
 
 # ---------------------------------------------------------------- Stage 1 디코딩
 def decode(outputs: List[np.ndarray], ratio: float, pad: Tuple[int, int],
-           orig_wh: Tuple[int, int], conf_thres: float):
-    feats = [to_nchw_head(o, NUM_CLASSES) for o in outputs]
+           orig_wh: Tuple[int, int], conf_thres: float,
+           num_classes: int = NUM_CLASSES, max_dets: int = MAX_DETS):
+    """YOLOv8 head 출력을 박스로 푼다.
+
+    `num_classes` 는 같은 구조를 클래스 수만 달리해 export 한 모델을 위해 열어 둔 것이다.
+    (예: ./task_ai.xmodel 의 쓰레기 9클래스 — head 채널이 4*REG_MAX+9=73 이라
+    기본값 4 로는 reg_max 가 정수로 안 떨어져 layout 추론부터 실패한다.)
+
+    `max_dets` 도 같은 이유로 열어 둔다. 제스처는 손 하나(기본 1)만 보면 되지만 —
+    2단계가 boxes[0] 로 시퀀스를 만든다 — 쓰레기는 한 화면에 여러 개가 있다.
+    """
+    feats = [to_nchw_head(o, num_classes) for o in outputs]
     feats = sorted(feats, key=lambda t: t.shape[2] * t.shape[3], reverse=True)
 
     all_boxes = []
@@ -188,12 +201,12 @@ def decode(outputs: List[np.ndarray], ratio: float, pad: Tuple[int, int],
 
     for feat, stride in zip(feats, STRIDES):
         _, c, h, w = feat.shape
-        reg_max = (c - NUM_CLASSES) // 4
+        reg_max = (c - num_classes) // 4
         if reg_max != REG_MAX:
             raise RuntimeError(f"reg_max mismatch: expected={REG_MAX}, got={reg_max}")
 
         dist_logits = feat[:, : 4 * REG_MAX, :, :].reshape(1, 4, REG_MAX, h, w)
-        cls_logits = feat[:, 4 * REG_MAX: 4 * REG_MAX + NUM_CLASSES, :, :]
+        cls_logits = feat[:, 4 * REG_MAX: 4 * REG_MAX + num_classes, :, :]
 
         dist_prob = softmax(dist_logits, axis=2)
         bins = np.arange(REG_MAX, dtype=np.float32).reshape(1, 1, REG_MAX, 1, 1)
@@ -215,7 +228,7 @@ def decode(outputs: List[np.ndarray], ratio: float, pad: Tuple[int, int],
         y2 = (cy + b) * float(stride)
         all_boxes.append(np.stack([x1, y1, x2, y2], axis=1))
 
-        probs = sigmoid(cls_logits[0]).transpose(1, 2, 0).reshape(-1, NUM_CLASSES)
+        probs = sigmoid(cls_logits[0]).transpose(1, 2, 0).reshape(-1, num_classes)
         all_probs.append(probs)
 
     boxes = np.concatenate(all_boxes, axis=0)
@@ -240,8 +253,8 @@ def decode(outputs: List[np.ndarray], ratio: float, pad: Tuple[int, int],
     ow, oh = orig_wh
     boxes = scale_boxes_back(boxes, ratio, pad, ow, oh)
 
-    if len(scores) > MAX_DETS:
-        order = np.argsort(scores)[::-1][:MAX_DETS]
+    if len(scores) > max_dets:
+        order = np.argsort(scores)[::-1][:max_dets]
         boxes = boxes[order]
         scores = scores[order]
         cls_ids = cls_ids[order]
@@ -490,10 +503,12 @@ class SequenceDumper:
 
 
 # ---------------------------------------------------------------- 표시
-def draw(frame: np.ndarray, boxes: np.ndarray, scores: np.ndarray, cls_ids: np.ndarray):
+def draw(frame: np.ndarray, boxes: np.ndarray, scores: np.ndarray, cls_ids: np.ndarray,
+         labels: List[str] = SHAPE_CLASSES):
+    """`labels` 는 decode(num_classes=...) 와 짝이다. 다른 모델이면 그 모델의 클래스 목록을 준다."""
     for box, score, cls_id in zip(boxes, scores, cls_ids):
         x1, y1, x2, y2 = box.astype(np.int32)
-        name = SHAPE_CLASSES[cls_id] if 0 <= cls_id < len(SHAPE_CLASSES) else str(cls_id)
+        name = labels[cls_id] if 0 <= cls_id < len(labels) else str(cls_id)
         color = COLORS[cls_id % len(COLORS)]
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
         cv2.putText(frame, f"{name}:{score:.2f}", (x1, max(0, y1 - 8)),
