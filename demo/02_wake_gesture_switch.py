@@ -35,9 +35,12 @@ import numpy as np
 if not SELF_TEST:
     from gesture_live import (
         Runner, GestureClassifier, SequenceBuffer,
-        build_sequence, is_active, decode, draw,
+        build_sequence, is_active, draw,
         SHAPE_CLASSES, GESTURE_CLASSES,
+        
     )
+    from decode_fast import decode          # 원본과 등가. DFL을 통과 앵커에만
+    from preprocess_fast import attach      # 원본과 비트 단위 동일. LUT 1장
 else:
     SHAPE_CLASSES = ["open_palm", "fist", "thumb_up", "thumb_down"]   # 점검용 사본
 
@@ -525,6 +528,7 @@ class DpuWorker(threading.Thread):
 
         try:
             rt = Runner(BIT_PATH, GESTURE_XMODEL)
+            attach(rt)                       # rt.preprocess 를 최적화판으로 교체
             gru = GestureClassifier(GRU_PATH)
             print(f"[DPU ] input={rt.in_dims} layout={rt.layout} int8={rt.in_is_int8}")
         except Exception as e:
@@ -596,6 +600,13 @@ class DpuWorker(threading.Thread):
                 boxes[:, [0, 2]] += ox
                 boxes[:, [1, 3]] += oy
 
+            now = time.time()
+            # 쿨다운 중에는 손 박스를 화면에 내지 않는다. 예측이 멈춰 있는 구간인데
+            # 박스가 남아 있으면 아직 명령을 받는 중인 것처럼 보인다.
+            # det 자체는 남긴다 — None 으로 두면 compose() 의 활성 카메라 테두리까지
+            # 같이 꺼져서 쿨다운마다 테두리가 깜빡인다. 빈 검출은 draw() 가 무시한다.
+            if mode == "gesture" and now < cooldown_until:
+                boxes, scores, cls_ids = boxes[:0], scores[:0], cls_ids[:0]
             self.det = {"cam": idx, "boxes": boxes, "scores": scores,
                         "cls_ids": cls_ids, "labels": labels}
 
@@ -603,7 +614,6 @@ class DpuWorker(threading.Thread):
                 continue             # 작업 모델은 그리기만 한다. 2단계(GRU)는 제스처 전용
 
             # ---- 2단계: 특징 시퀀스 -> GRU (gesture_live.main 과 같은 규칙) ----
-            now = time.time()
             if len(boxes):
                 x1, y1, x2, y2 = boxes[0]
                 ow, oh = orig_wh
